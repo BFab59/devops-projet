@@ -1,0 +1,135 @@
+name: CI/CD Pipeline — Velov Tracker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 : Tests
+  # ─────────────────────────────────────────
+  test:
+    name: Tests automatiques
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installer les dépendances
+        run: |
+          pip install -r app/requirements.txt
+          pip install pytest
+
+      - name: Lancer les tests
+        run: pytest tests/ -v
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Build et push sur ECR
+  # ─────────────────────────────────────────
+  build:
+    name: Build image Docker
+    runs-on: ubuntu-latest
+    needs: test  # démarre seulement si test réussi
+    outputs:
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer les credentials AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login sur Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Générer les tags de l'image
+        id: meta
+        run: |
+          SHA_TAG=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "Tag SHA : ${SHA_TAG}"
+
+      - name: Build et push de l'image
+        env:
+          SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
+        run: |
+          docker build -t $ECR_REPOSITORY:latest \
+                       -t $ECR_REPOSITORY:$SHA_TAG \
+                       ./app
+
+          docker push $ECR_REPOSITORY:latest
+          docker push $ECR_REPOSITORY:$SHA_TAG
+
+          echo "✅ Image pushée : $ECR_REPOSITORY:$SHA_TAG"
+
+  # ─────────────────────────────────────────
+  # JOB 3 : Déploiement sur ec2-prod
+  # ─────────────────────────────────────────
+  deploy:
+    name: Déploiement sur ec2-prod
+    runs-on: ubuntu-latest
+    needs: build  # démarre seulement si build réussi
+
+    steps:
+      - name: Déployer via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Authentification ECR depuis ec2-prod
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin \
+              $(echo ${{ secrets.ECR_REPOSITORY }} | cut -d'/' -f1)
+
+            # Pull de la nouvelle image
+            docker pull ${{ secrets.ECR_REPOSITORY }}:latest
+
+            # Arrêt et suppression de l'ancien container
+            docker stop velov-tracker 2>/dev/null || true
+            docker rm velov-tracker 2>/dev/null || true
+
+            # Lancement du nouveau container
+            docker run -d \
+              --name velov-tracker \
+              --restart unless-stopped \
+              -p 5000:5000 \
+              -e JCDECAUX_API_KEY=${{ secrets.JCDECAUX_API_KEY }} \
+              -e JCDECAUX_CONTRACT=${{ secrets.JCDECAUX_CONTRACT }} \
+              ${{ secrets.ECR_REPOSITORY }}:latest
+
+            echo "✅ Container déployé"
+
+      - name: Healthcheck post-déploiement
+        run: |
+          echo "Attente démarrage du container (15s)..."
+          sleep 15
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            http://${{ secrets.EC2_HOST }}/health)
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Healthcheck OK — app répond sur /health"
+          else
+            echo "❌ Healthcheck FAILED — code HTTP : $HTTP_CODE"
+            exit 1
+          fi
