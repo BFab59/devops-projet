@@ -125,7 +125,7 @@ jobs:
           sleep 15
 
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            http://${{ secrets.EC2_HOST }}/health)
+            http://${{ secrets.EC2_HOST }}:5000/health)
 
           if [ "$HTTP_CODE" = "200" ]; then
             echo "✅ Healthcheck OK — app répond sur /health"
