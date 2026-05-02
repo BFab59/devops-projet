@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tracker Vélos — Projet DevOps</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; }
+    header {
+      padding: 16px 24px;
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header h1 { font-size: 18px; font-weight: 600; }
+    #status {
+      font-size: 13px;
+      padding: 4px 12px;
+      border-radius: 20px;
+      background: #166534;
+      color: #bbf7d0;
+    }
+    #stats {
+      display: flex;
+      gap: 16px;
+      padding: 12px 24px;
+      background: #1e293b;
+      font-size: 13px;
+      color: #94a3b8;
+    }
+    #stats span { color: #e2e8f0; font-weight: 500; }
+    #map { height: calc(100vh - 110px); width: 100%; }
+    .legend {
+      background: #1e293b;
+      border: 1px solid #334155;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.8;
+    }
+    .dot {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🚲 Tracker Vélos en temps réel</h1>
+    <div id="status">Chargement...</div>
+  </header>
+  <div id="stats">
+    Stations : <span id="total">—</span> &nbsp;|&nbsp;
+    Disponibles : <span id="dispo">—</span> &nbsp;|&nbsp;
+    Vides : <span id="vides">—</span> &nbsp;|&nbsp;
+    Dernière MAJ : <span id="lastupdate">—</span>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([48.8566, 2.3522], 13);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '© OpenStreetMap © CARTO',
+      maxZoom: 19
+    }).addTo(map);
+
+    // Légende
+    const legend = L.control({ position: 'bottomright' });
+    legend.onAdd = () => {
+      const div = L.DomUtil.create('div', 'legend');
+      div.innerHTML = `
+        <b>Disponibilité vélos</b><br>
+        <span class="dot" style="background:#22c55e"></span>Disponible (≥5)<br>
+        <span class="dot" style="background:#f59e0b"></span>Faible (1-4)<br>
+        <span class="dot" style="background:#ef4444"></span>Vide / Fermé
+      `;
+      return div;
+    };
+    legend.addTo(map);
+
+    let markers = [];
+
+    function getColor(bikes, status) {
+      if (status !== 'OPEN') return '#ef4444';
+      if (bikes >= 5) return '#22c55e';
+      if (bikes >= 1) return '#f59e0b';
+      return '#ef4444';
+    }
+
+    function makeIcon(color) {
+      return L.divIcon({
+        className: '',
+        html: `<div style="
+          width:14px; height:14px;
+          border-radius:50%;
+          background:${color};
+          border:2px solid white;
+          box-shadow:0 0 6px ${color}88;
+        "></div>`,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
+    }
+
+    async function fetchStations() {
+      try {
+        const res = await fetch('/api/stations');
+        const data = await res.json();
+
+        if (data.error) throw new Error(data.error);
+
+        // Nettoyer les anciens markers
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+
+        let dispo = 0, vides = 0;
+
+        data.forEach(s => {
+          const color = getColor(s.available_bikes, s.status);
+          if (s.available_bikes >= 1 && s.status === 'OPEN') dispo++;
+          else vides++;
+
+          const marker = L.marker([s.lat, s.lng], { icon: makeIcon(color) })
+            .bindPopup(`
+              <b>${s.name}</b><br>
+              🚲 Vélos dispo : <b>${s.available_bikes}</b><br>
+              🅿️ Places libres : <b>${s.available_bike_stands}</b><br>
+              Statut : ${s.status === 'OPEN' ? '✅ Ouvert' : '❌ Fermé'}
+            `);
+          marker.addTo(map);
+          markers.push(marker);
+        });
+
+        // Mise à jour stats
+        document.getElementById('total').textContent = data.length;
+        document.getElementById('dispo').textContent = dispo;
+        document.getElementById('vides').textContent = vides;
+        document.getElementById('lastupdate').textContent =
+          new Date().toLocaleTimeString('fr-FR');
+        document.getElementById('status').textContent = '✓ En direct';
+        document.getElementById('status').style.background = '#166534';
+
+      } catch(e) {
+        document.getElementById('status').textContent = '⚠ Erreur API';
+        document.getElementById('status').style.background = '#7f1d1d';
+        console.error(e);
+      }
+    }
+
+    // Chargement initial puis toutes les 30 secondes
+    fetchStations();
+    setInterval(fetchStations, 30000);
+  </script>
+</body>
+</html>
